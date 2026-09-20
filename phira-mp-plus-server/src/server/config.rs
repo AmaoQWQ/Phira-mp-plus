@@ -457,6 +457,16 @@ pub struct PlusConfig {
     pub table_retention: std::collections::HashMap<String, TableRetention>,
     #[serde(default)]
     pub admin_phira_ids: Vec<i32>,
+    /// 管理 HTTP API 的固定令牌。为空时管理 API 返回 admin-disabled。
+    /// 该值也作为回调请求的 x-tphira-token，绝不会写入日志。
+    #[serde(default)]
+    pub admin_token: String,
+    /// 旧版赛事成绩回调；为空时完全禁用，不影响本地房间状态机。
+    #[serde(default)]
+    pub contest_result_callback_url: Option<String>,
+    /// 托管房事件回调；为空时完全禁用，不影响独立部署。
+    #[serde(default)]
+    pub custom_room_event_callback_url: Option<String>,
     /// 游玩时间排行榜过滤用户（不显示的 Phira ID，如测试站 Bot）。
     #[serde(default)]
     pub filtered_player_ids: Vec<i32>,
@@ -516,6 +526,9 @@ impl Default for PlusConfig {
             database_url: String::new(),
             table_retention: std::collections::HashMap::new(),
             admin_phira_ids: Vec::new(),
+            admin_token: String::new(),
+            contest_result_callback_url: None,
+            custom_room_event_callback_url: None,
             filtered_player_ids: Vec::new(),
             wasm_runtime: WasmRuntimeConfig::default(),
             runtime: RuntimeConfig::default(),
@@ -551,6 +564,31 @@ impl PlusConfig {
                 }
             }
         }
+        if let Ok(value) = std::env::var("ROOM_CREATION_ENABLED") {
+            self.room_creation_enabled = parse_env_bool("ROOM_CREATION_ENABLED", &value)?;
+        }
+        if let Ok(value) = std::env::var("ROOM_MAX_USERS") {
+            self.max_users_per_room = Some(parse_env_positive_usize("ROOM_MAX_USERS", &value)?);
+        }
+        if let Ok(value) = std::env::var("MAX_ROOMS") {
+            self.max_rooms = Some(parse_env_positive_usize("MAX_ROOMS", &value)?);
+        }
+        if let Ok(value) = std::env::var("PLAYING_RECONNECT_GRACE") {
+            self.idle.playing_reconnect_grace_secs = value.trim().parse::<u64>().map_err(|_| {
+                AppError::ConfigValidation(
+                    "PLAYING_RECONNECT_GRACE 必须是大于等于 0 的整数".to_string(),
+                )
+            })?;
+        }
+        if let Ok(value) = std::env::var("ADMIN_TOKEN") {
+            self.admin_token = value.trim().to_string();
+        }
+        if let Ok(value) = std::env::var("CONTEST_RESULT_CALLBACK_URL") {
+            self.contest_result_callback_url = non_empty_env(value);
+        }
+        if let Ok(value) = std::env::var("CUSTOM_ROOM_EVENT_CALLBACK_URL") {
+            self.custom_room_event_callback_url = non_empty_env(value);
+        }
         self.phira_api_endpoint = normalize_phira_api_endpoint(&self.phira_api_endpoint)
             .map_err(AppError::ConfigValidation)?;
         Ok(())
@@ -561,7 +599,7 @@ impl PlusConfig {
         let mut value = serde_json::to_value(self).unwrap_or_default();
         // Mask known secret fields
         if let Some(obj) = value.as_object_mut() {
-            for field in &["database_url"] {
+            for field in &["database_url", "admin_token"] {
                 if let Some(val) = obj.get_mut(*field) {
                     let is_non_empty_string = val.as_str().is_some_and(|s| !s.is_empty());
                     if is_non_empty_string {
@@ -874,6 +912,76 @@ fn default_http_bind_address() -> String {
 fn default_config_path() -> String {
     "server_config.yml".to_string()
 }
+
+/// 将运行时房间创建开关防抖写回原 YAML。500ms 是管理配置保存窗口，
+/// 与预约房加入后等待客户端安装状态的 500ms 没有关系。
+pub(crate) fn schedule_room_creation_config_save(
+    state: &std::sync::Arc<super::PlusServerState>,
+) {
+    use std::sync::atomic::Ordering;
+
+    let generation = state
+        .room_creation_save_generation
+        .fetch_add(1, Ordering::AcqRel)
+        + 1;
+    let state = std::sync::Arc::downgrade(state);
+    crate::supervisor_actor::spawn_named("room-creation-config-save", async move {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let Some(state) = state.upgrade() else { return };
+        if state.room_creation_save_generation.load(Ordering::Acquire) != generation {
+            return;
+        }
+        let path = state.config.config_path.clone();
+        let enabled = state.room_creation_enabled.load(Ordering::Acquire);
+        match tokio::task::spawn_blocking(move || persist_room_creation_enabled(&path, enabled)).await {
+            Ok(Ok(())) => tracing::info!(enabled, "房间创建开关已保存到配置文件"),
+            Ok(Err(error)) => tracing::error!(%error, "保存房间创建开关失败"),
+            Err(error) => tracing::error!(%error, "房间创建开关保存任务失败"),
+        }
+    });
+}
+
+fn persist_room_creation_enabled(path: &str, enabled: bool) -> Result<(), String> {
+    let content = std::fs::read_to_string(path).map_err(|error| format!("读取 {path} 失败：{error}"))?;
+    let mut output = String::with_capacity(content.len() + 40);
+    let mut replaced = false;
+    for line in content.split_inclusive('\n') {
+        let without_newline = line.trim_end_matches(['\r', '\n']);
+        let trimmed = without_newline.trim_start();
+        if !trimmed.starts_with('#') && trimmed.starts_with("room_creation_enabled:") {
+            let indent_len = without_newline.len() - trimmed.len();
+            output.push_str(&without_newline[..indent_len]);
+            output.push_str(if enabled {
+                "room_creation_enabled: true"
+            } else {
+                "room_creation_enabled: false"
+            });
+            if line.ends_with("\r\n") {
+                output.push_str("\r\n");
+            } else if line.ends_with('\n') {
+                output.push('\n');
+            }
+            replaced = true;
+        } else {
+            output.push_str(line);
+        }
+    }
+    if !replaced {
+        if !output.ends_with('\n') {
+            output.push('\n');
+        }
+        output.push_str(if enabled {
+            "room_creation_enabled: true\n"
+        } else {
+            "room_creation_enabled: false\n"
+        });
+    }
+    let temporary = format!("{path}.room-creation.tmp");
+    std::fs::write(&temporary, output).map_err(|error| format!("写入临时配置失败：{error}"))?;
+    std::fs::copy(&temporary, path).map_err(|error| format!("替换配置失败：{error}"))?;
+    let _ = std::fs::remove_file(&temporary);
+    Ok(())
+}
 fn default_plugins_dir() -> String {
     "plugins".to_string()
 }
@@ -919,7 +1027,32 @@ impl Default for IdleConfig {
 fn default_heartbeat_timeout() -> u64 { 15 }
 fn default_auth_timeout() -> u64 { 15 }
 fn default_dangle_grace_secs() -> u64 { 10 }
-fn default_playing_reconnect_grace_secs() -> u64 { 15 }
+fn default_playing_reconnect_grace_secs() -> u64 { 5 }
+
+fn parse_env_bool(name: &str, value: &str) -> Result<bool, AppError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(AppError::ConfigValidation(format!(
+            "{name} 必须是 true/false、1/0、yes/no 或 on/off"
+        ))),
+    }
+}
+
+fn parse_env_positive_usize(name: &str, value: &str) -> Result<usize, AppError> {
+    let parsed = value.trim().parse::<usize>().map_err(|_| {
+        AppError::ConfigValidation(format!("{name} 必须是正整数"))
+    })?;
+    if parsed == 0 {
+        return Err(AppError::ConfigValidation(format!("{name} 必须大于 0")));
+    }
+    Ok(parsed)
+}
+
+fn non_empty_env(value: String) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
 
 // ── OpenUDS Config ──────────────────────────────────────────
 
@@ -1018,7 +1151,7 @@ fn default_auto_update_min_idle_minutes() -> u64 {
 }
 
 fn default_auto_update_github_repo() -> String {
-    "HyperSynapseNetwork/Phira-mp-plus".to_string()
+    "AmaoQWQ/Phira-mp-plus".to_string()
 }
 
 fn default_phira_api() -> String {
@@ -1198,7 +1331,7 @@ mod tests {
         assert_eq!(config.auto_update.min_idle_minutes, 10);
         assert_eq!(
             config.auto_update.github_repo,
-            "HyperSynapseNetwork/Phira-mp-plus"
+            "AmaoQWQ/Phira-mp-plus"
         );
         let live = LiveConfig::from_full(&config);
         assert!(!live.auto_update.enabled);
@@ -1406,5 +1539,28 @@ mod tests {
             ..Default::default()
         };
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn room_creation_persistence_updates_only_the_active_yaml_key() {
+        let path = std::env::temp_dir().join(format!(
+            "pmp-room-creation-{}-{}.yml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            "# room_creation_enabled: false\nroom_creation_enabled: true\nchat_enabled: true\n",
+        )
+        .unwrap();
+        super::persist_room_creation_enabled(path.to_str().unwrap(), false).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("# room_creation_enabled: false"));
+        assert!(content.contains("room_creation_enabled: false"));
+        assert!(content.contains("chat_enabled: true"));
+        let _ = std::fs::remove_file(path);
     }
 }

@@ -4,7 +4,7 @@ use crate::session::Session;
 use anyhow::{anyhow, Result};
 use fluent::FluentArgs;
 use phira_mp_common::{RoomEvent, ServerCommand, UserInfo};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
@@ -41,6 +41,10 @@ pub struct User {
     pub game_time: AtomicU32,
 
     pub dangle_mark: Mutex<Option<Arc<()>>>,
+    /// Playing 重连宽限的绝对截止时间；0 表示当前不在宽限中。
+    pub dangle_deadline_ms: AtomicI64,
+    /// “等待该玩家重连”提示在每次断线宽限中最多广播一次。
+    pub reconnect_wait_notified: AtomicBool,
     pub admin_cli_pending: Mutex<Option<String>>,
     /// 用户确认加入进行中游戏的房间 ID（第一次请求时设置，第二次直接加入）。
     pub join_pending_game: RwLock<Option<String>>,
@@ -68,6 +72,8 @@ impl User {
             game_time: AtomicU32::default(),
 
             dangle_mark: Mutex::default(),
+            dangle_deadline_ms: AtomicI64::new(0),
+            reconnect_wait_notified: AtomicBool::new(false),
             admin_cli_pending: Mutex::default(),
             join_pending_game: RwLock::default(),
         }
@@ -124,6 +130,8 @@ impl User {
         binding.generation += 1;
         binding.session = Some(session);
         *self.dangle_mark.lock().await = None;
+        self.dangle_deadline_ms.store(0, Ordering::Release);
+        self.reconnect_wait_notified.store(false, Ordering::Release);
         binding.generation
     }
 
@@ -134,6 +142,8 @@ impl User {
         binding.generation += 1;
         binding.session = None;
         *self.dangle_mark.lock().await = None;
+        self.dangle_deadline_ms.store(0, Ordering::Release);
+        self.reconnect_wait_notified.store(false, Ordering::Release);
     }
 
     /// PMP44 P0-C / PMP45 P0-C: 只清除与给定 `session_id` + `generation` 完全匹配的
@@ -155,6 +165,8 @@ impl User {
         binding.generation += 1;
         binding.session = None;
         *self.dangle_mark.lock().await = None;
+        self.dangle_deadline_ms.store(0, Ordering::Release);
+        self.reconnect_wait_notified.store(false, Ordering::Release);
         true
     }
 
@@ -171,6 +183,8 @@ impl User {
         binding.session = Some(session);
         binding.generation = generation;
         *self.dangle_mark.lock().await = None;
+        self.dangle_deadline_ms.store(0, Ordering::Release);
+        self.reconnect_wait_notified.store(false, Ordering::Release);
     }
 
     /// PMP47 A 原子加固: 在**单一写锁内**完成「检查并替换」绑定。
@@ -209,6 +223,8 @@ impl User {
         binding.session = Some(new_session);
         binding.generation = new_generation;
         *self.dangle_mark.lock().await = None;
+        self.dangle_deadline_ms.store(0, Ordering::Release);
+        self.reconnect_wait_notified.store(false, Ordering::Release);
         true
     }
 
@@ -374,6 +390,11 @@ impl User {
                     // Playing reconnect grace: keep room membership, use playing-specific timer.
                     let dangle_mark = Arc::new(());
                     *self.dangle_mark.lock().await = Some(Arc::clone(&dangle_mark));
+                    self.dangle_deadline_ms.store(
+                        crate::db::now_ms() + grace_secs as i64 * 1000,
+                        Ordering::Release,
+                    );
+                    self.reconnect_wait_notified.store(false, Ordering::Release);
                     drop(registration_guard);
 
                     self.server
@@ -395,6 +416,7 @@ impl User {
                                 } else { false }
                             };
                             if !expired { return; }
+                            self_.dangle_deadline_ms.store(0, Ordering::Release);
 
                             // Grace expired — abort game, remove from room.
                             let room = self_.room.read().await.as_ref().map(Arc::clone);

@@ -757,6 +757,13 @@ cli_enabled: true
 # 是否允许玩家建房（false 时只有管理员可通过 CLI 创建房间）
 # room_creation_enabled: true
 
+# PMP+ 自带管理 API 令牌。建议通过 ADMIN_TOKEN 环境变量提供，勿提交真实密钥。
+# admin_token: ""
+
+# 可选回调；留空时托管房功能完全独立运行。
+# custom_room_event_callback_url: "https://example.invalid/tphira/events"
+# contest_result_callback_url: "https://example.invalid/tphira/results"
+
 # ---- 自动更新 ----
 
 # 自动更新默认关闭，需显式开启。开启后启动时与每隔 check_interval_secs 检查
@@ -767,7 +774,7 @@ cli_enabled: true
 #   enabled: false
 #   check_interval_secs: 3600
 #   min_idle_minutes: 10
-#   github_repo: "HyperSynapseNetwork/Phira-mp-plus"
+#   github_repo: "AmaoQWQ/Phira-mp-plus"
 
 # ---- 限速 ----
 
@@ -780,6 +787,7 @@ cli_enabled: true
 # 断线重连宽限时间（秒）
 # idle:
 #   dangle_grace_secs: 10
+#   playing_reconnect_grace_secs: 5
 #   heartbeat_timeout_secs: 15
 
 # ---- WASM 运行时 ----

@@ -7,6 +7,31 @@ use serde_json::Value;
 use std::time::Instant;
 
 impl RoomCommandGateway {
+    pub async fn set_max_users(
+        &self,
+        state: &PlusServerState,
+        room_id: &str,
+        max_users: usize,
+    ) -> Result<Value, String> {
+        let started = Instant::now();
+        let rid = room_id.to_string();
+        let result = self
+            .room_mailbox(&rid, None, |reply| RoomActorCommand::SetMaxUsers {
+                _room_id: rid.clone(),
+                max_users,
+                reply,
+            })
+            .await;
+        self.finish_command(
+            state,
+            RoomCommandKind::SetMaxUsers.action(),
+            room_id,
+            started,
+            result,
+        )
+        .into_untyped()
+    }
+
     /// Set the room host. `None` means the system `?` host.
     pub async fn set_host(
         &self,

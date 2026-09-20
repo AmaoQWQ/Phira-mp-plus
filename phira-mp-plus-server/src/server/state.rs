@@ -7,10 +7,10 @@ use crate::extensions::ExtensionManager;
 use crate::plugin::PluginManager;
 use crate::plugin_http::SseHub;
 use phira_mp_common::RoomId;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use uuid::Uuid;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Weak};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex, Notify, RwLock, Semaphore};
@@ -65,6 +65,10 @@ pub struct PlusServerState {
     /// authentication for one account cannot create two authoritative users.
     pub user_registration_gate: Mutex<()>,
     pub rooms: SafeMap<RoomId, Arc<crate::room::Room>>,
+    /// 通用托管房和一次性预约房定义。所有跨房间的创建、更新、解散
+    /// 通过 managed_room_ops 串行化，房间内部状态仍由各自 actor 串行化。
+    pub managed_rooms: RwLock<HashMap<String, crate::managed_rooms::ManagedRoomDefinition>>,
+    pub managed_room_ops: Mutex<()>,
     pub lost_con_tx: mpsc::Sender<Uuid>,
     pub plugin_manager: Arc<PluginManager>,
     pub extensions: Arc<ExtensionManager>,
@@ -78,6 +82,8 @@ pub struct PlusServerState {
     /// 玩家建房开关（`roomcreation on|off` 切换，config reload 不重置；YAML
     /// `room_creation_enabled` 仅启动时生效）。
     pub room_creation_enabled: AtomicBool,
+    /// 房间创建开关配置保存的防抖代次；连续修改只落盘最后一次值。
+    pub room_creation_save_generation: AtomicU64,
     /// 自动更新总开关（`update auto on|off` 切换，config reload 不重置；YAML
     /// `auto_update.enabled` 仅启动时生效）。
     pub auto_update_enabled: AtomicBool,

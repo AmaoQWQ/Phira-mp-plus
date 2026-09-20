@@ -56,6 +56,25 @@ impl PlusServerState {
         endpoint: Option<String>,
         persistent_empty: bool,
     ) -> Result<Value, String> {
+        let max_users = self.config.max_users_per_room.unwrap_or(100);
+        self.create_empty_room_with_capacity(
+            room_id,
+            endpoint,
+            persistent_empty,
+            max_users,
+        )
+        .await
+    }
+
+    /// 创建具有明确容量的空房间。管理房使用该入口，避免把全局普通房容量
+    /// 错当成托管房或预约房容量。
+    pub async fn create_empty_room_with_capacity(
+        self: &Arc<Self>,
+        room_id: &str,
+        endpoint: Option<String>,
+        persistent_empty: bool,
+        max_users: usize,
+    ) -> Result<Value, String> {
         let rid: RoomId = room_id
             .to_string()
             .try_into()
@@ -63,7 +82,6 @@ impl PlusServerState {
         let endpoint = endpoint
             .map(|value| normalize_phira_api_endpoint(&value))
             .transpose()?;
-        let max_users = self.config.max_users_per_room.unwrap_or(100);
         let room = Arc::new(crate::room::Room::new_empty(
             rid.clone(),
             Some(Arc::clone(&self.plugin_manager)),

@@ -725,6 +725,7 @@ impl CliHandler {
         self.state
             .room_creation_enabled
             .store(enabled, std::sync::atomic::Ordering::Release);
+        crate::server::config::schedule_room_creation_config_save(&self.state);
         self.out(format!(
             "  {} 玩家建房已{}",
             c::green("✓"),

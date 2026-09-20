@@ -20,7 +20,10 @@
     "connection_rate_limit": { "type": "integer", "minimum": 1, "default": 30 },
     "connection_rate_window": { "type": "integer", "minimum": 1, "default": 10 },
     "database_url": { "type": "string" },
-    "admin_token": { "oneOf": [{ "type": "null" }, { "type": "string" }], "default": null },
+    "admin_token": { "type": "string", "default": "" },
+    "contest_result_callback_url": { "oneOf": [{ "type": "null" }, { "type": "string", "format": "uri" }], "default": null },
+    "custom_room_event_callback_url": { "oneOf": [{ "type": "null" }, { "type": "string", "format": "uri" }], "default": null },
+    "room_creation_enabled": { "type": "boolean", "default": true },
     "server_name": { "oneOf": [{ "type": "null" }, { "type": "string" }] },
     "plugins_dir": { "type": "string", "default": "plugins" },
     "chat_enabled": { "type": "boolean", "default": true },
@@ -44,6 +47,15 @@
         "persistence_queue_capacity": { "type": "integer", "minimum": 16, "maximum": 1000000, "default": 4096 },
         "persistence_dead_letter_path": { "oneOf": [{ "type": "null" }, { "type": "string" }] },
         "persistence_wal_path": { "type": "string", "default": "data/persistence-worker.wal.jsonl" }
+      }
+    },
+    "idle": {
+      "type": "object",
+      "properties": {
+        "heartbeat_timeout_secs": { "type": "integer", "minimum": 1, "default": 15 },
+        "auth_timeout_secs": { "type": "integer", "minimum": 1, "default": 15 },
+        "dangle_grace_secs": { "type": "integer", "minimum": 0, "default": 10 },
+        "playing_reconnect_grace_secs": { "type": "integer", "minimum": 0, "default": 5 }
       }
     }
   },

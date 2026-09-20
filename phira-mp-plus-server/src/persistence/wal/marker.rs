@@ -83,7 +83,10 @@ impl PersistenceWal {
             tokio::fs::rename(&tmp_path, marker_path)
                 .await
                 .map_err(|e| format!("rename instance marker {} -> {}: {e}", tmp_path.display(), marker_path.display()))?;
-            // Parent fsync failures are propagated (P1).
+            // Parent-directory fsync is supported on Unix. Opening a directory
+            // through tokio::fs::File returns access denied on Windows, after
+            // the marker itself has already been synced and renamed.
+            #[cfg(not(windows))]
             if let Some(parent) = marker_path.parent().filter(|p| !p.as_os_str().is_empty()) {
                 let dir = tokio::fs::File::open(parent)
                     .await
