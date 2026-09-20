@@ -7,14 +7,14 @@
 # ---- 网络 ----
 
 # TCP 监听端口（游戏客户端直连）
-port: 12346
+port: 12356
 
 # PMP HTTP/SSE/WebSocket 端口。仅应位于受控网络，不直接暴露公网。
-http_port: 12347
+http_port: 12357
 
 # HTTP/SSE 监听地址。默认 0.0.0.0（所有接口）。
 # 生产环境中如通过反向代理访问，建议改为 127.0.0.1。
-# http_bind_address: "0.0.0.0"
+http_bind_address: "127.0.0.1"
 
 # 可信转发头兼容监听端口。该端口读取 X-Forwarded-For；它不是 HAProxy PROXY protocol v1/v2。
 # 只能放在可信反向代理之后，禁止直接暴露给不可信客户端。设为 0 禁用。
@@ -185,21 +185,39 @@ connection_rate_window: 10
 #   enabled: false
 #   check_interval_secs: 3600
 #   min_idle_minutes: 10
-#   github_repo: "HyperSynapseNetwork/Phira-mp-plus"
+#   github_repo: "AmaoQWQ/Phira-mp-plus"
 
 # ---- 定制 / 管理 ----
+
+# PMP+ 自带管理 API 的令牌。为空时 /admin/rooms 管理接口关闭。
+# 生产环境建议通过 ADMIN_TOKEN 环境变量注入，不要把真实令牌提交到 Git。
+admin_token: ""
+
+# 房间/回合事件回调均为可选项；留空时 PMP+ 完全独立运行，不依赖 Phirank。
+# custom_room_event_callback_url: "https://example.invalid/tphira/events"
+# contest_result_callback_url: "https://example.invalid/tphira/results"
+
+# 是否允许普通客户端创建房间。CLI、管理 API 创建托管房不受此开关影响。
+# CLI/OpenUDS 修改此项时会在 500ms 防抖窗口后写回本文件。
+room_creation_enabled: true
+
+# 普通状态断线保留 10 秒；Playing 默认保留 5 秒，设为 0 可恢复立即退出。
+idle:
+  dangle_grace_secs: 10
+  playing_reconnect_grace_secs: 5
 
 # 服务器名称（显示在欢迎语等位置）
 # server_name: "My Phira Server"
 
 # 欢迎语（单文件配置）。缺省 = 内置国际化默认（随版本更新，按用户语言渲染）。
 # messages 为 lang → 模板列表（占位符见 `welcome-config` 命令）。
-# welcome:
-#   messages:
-#     zh-CN: ["欢迎 [user_name] 来到本服！当前在线 [player-count] 人。", "活跃房间：[active_rooms]"]
-#     en-US: ["Welcome [user_name]! [player-count] online.", "Active rooms: [active_rooms]"]
-#   show_time: true
-#   time_format: "%Y-%m-%d %H:%M"
+welcome:
+  messages:
+    zh-CN: ["本服务器使用 AmaoQWQ 的定制 PMP+：https://github.com/AmaoQWQ/Phira-mp-plus"]
+    zh-TW: ["本服务器使用 AmaoQWQ 的定制 PMP+：https://github.com/AmaoQWQ/Phira-mp-plus"]
+    en-US: ["This server uses AmaoQWQ's customized PMP+: https://github.com/AmaoQWQ/Phira-mp-plus"]
+  show_time: false
+  time_format: "%Y-%m-%d %H:%M"
 
 # 游戏内管理员 Phira ID。管理员在创建房间弹窗输入 _<CLI命令> 时不会创建房间，
 # 而是执行服务端 CLI 命令，并把输出通过聊天消息发回该客户端。
@@ -214,4 +232,4 @@ admin_phira_ids: []
 # ---- Sentry 错误监控 ----
 # 将 sentry_dsn 设为有效的 Sentry DSN 以启用 panic/error 自动上报。
 # 留空或注释掉即禁用。
-sentry_dsn: "https://bfd3336a4f5ee99b6c99122476a335ba@o4511822631600128.ingest.de.sentry.io/4511822679048272"
+sentry_dsn: ""

@@ -3,6 +3,7 @@
 mod router;
 mod sse;
 mod websocket;
+mod admin_rooms;
 
 use crate::plugin::PluginManager;
 use crate::server::PlusServerState;
@@ -110,6 +111,7 @@ impl PluginHttpServer {
             .route("/health/ready", get(health_ready))
             .route("/api/events", get(general_sse_handler))
             .route("/api/ws", get(websocket::handler))
+            .merge(admin_rooms::router())
             .route("/{*path}", any(dynamic_handler))
             .layer(CorsLayer::permissive());
 

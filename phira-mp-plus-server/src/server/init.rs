@@ -208,6 +208,8 @@ impl PlusServer {
             users: SafeMap::default(),
             user_registration_gate: Mutex::new(()),
             rooms: SafeMap::default(),
+            managed_rooms: RwLock::new(std::collections::HashMap::new()),
+            managed_room_ops: Mutex::new(()),
             lost_con_tx,
             plugin_manager,
             extensions,
@@ -216,6 +218,7 @@ impl PlusServer {
             shutting_down: AtomicBool::new(false),
             accept_new_connections: AtomicBool::new(true),
             room_creation_enabled: AtomicBool::new(initial_room_creation_enabled),
+            room_creation_save_generation: std::sync::atomic::AtomicU64::new(0),
             auto_update_enabled: AtomicBool::new(initial_auto_update_enabled),
             connection_limiter: crate::rate_limiter::ConnectionRateLimiter::new(
                 rate_limit,
@@ -271,6 +274,7 @@ impl PlusServer {
         state.room_commands.start_mailbox(Arc::clone(&state), 1024);
         info!("startup recovery: running postgres state recovery");
         super::recovery::recover_state(&state, &state.db_manager).await?;
+        crate::managed_rooms_runtime::restore_hosted_rooms(&state).await?;
         info!("startup recovery: complete");
         let lost_con_state = Arc::clone(&state);
         crate::supervisor_actor::spawn_critical("lost-connection-worker", async move {

@@ -10,7 +10,7 @@
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-2021-dea584.svg?logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Build](https://github.com/HyperSynapseNetwork/Phira-mp-plus/actions/workflows/build.yml/badge.svg)](https://github.com/HyperSynapseNetwork/Phira-mp-plus/actions/workflows/build.yml)
+[![Build](https://github.com/AmaoQWQ/Phira-mp-plus/actions/workflows/build.yml/badge.svg)](https://github.com/AmaoQWQ/Phira-mp-plus/actions/workflows/build.yml)
 [![Tokio](https://img.shields.io/badge/Tokio-异步-e0c0a0.svg?logo=rust&logoColor=white)](https://tokio.rs/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg?logo=docker&logoColor=white)](https://www.docker.com/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-数据库-336791.svg?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
@@ -18,10 +18,22 @@
 [![wasmtime](https://img.shields.io/badge/wasmtime-WASM%20插件-2E3B4E.svg?logo=rust&logoColor=white)](https://wasmtime.dev/)
 [![WIT](https://img.shields.io/badge/插件%20ABI-WIT%20component-7f52ff.svg)](https://component-model.bytecodealliance.org/)
 [![i18n](https://img.shields.io/badge/i18n-fluent-1b6ac9.svg)](https://projectfluent.org/)
-[![GitHub stars](https://img.shields.io/github/stars/HyperSynapseNetwork/Phira-mp-plus?style=social)](https://github.com/HyperSynapseNetwork/Phira-mp-plus/stargazers)
-[![Last commit](https://img.shields.io/github/last-commit/HyperSynapseNetwork/Phira-mp-plus)](https://github.com/HyperSynapseNetwork/Phira-mp-plus/commits/main)
+[![GitHub stars](https://img.shields.io/github/stars/AmaoQWQ/Phira-mp-plus?style=social)](https://github.com/AmaoQWQ/Phira-mp-plus/stargazers)
+[![Last commit](https://img.shields.io/github/last-commit/AmaoQWQ/Phira-mp-plus)](https://github.com/AmaoQWQ/Phira-mp-plus/commits/main)
 
 </div>
+
+> [!IMPORTANT]
+> 这是供 [Phira Local Chart Manager](https://github.com/AmaoQWQ/Phira-Local-Chart-Manager) 使用的定制分支，基于 [HyperSynapseNetwork/Phira-mp-plus](https://github.com/HyperSynapseNetwork/Phira-mp-plus) 开发。它新增了长期托管房、预约白名单房、原生房间管理 API、谱池模式与持久化恢复等集成能力。这些接口不存在于对应的上游 Release 中，请使用本仓库发布的二进制。
+
+### 相对上游的定制内容
+
+- 长期托管房和一次性预约白名单房。
+- 通过 `x-admin-token` 认证的 `/admin/rooms` HTTP 管理接口。
+- `HOST_SELECT` 和 `POOL_RANDOM` 选谱模式，以及容量、房主、白名单、聊天和谱池管理。
+- `mp_managed_rooms` 持久化、解散墓碑与重启恢复。
+- 可选的房间事件/比赛结果回调，以及普通客户端建房开关。
+- Playing 状态默认断线重连宽限由 15 秒调整为 5 秒。
 
 > [!TIP]
 > 第一次来？直接看[快速开始](#快速开始)。
@@ -73,7 +85,7 @@
 
 ### 下载发行版（推荐）
 
-从 [Releases](https://github.com/HyperSynapseNetwork/Phira-mp-plus/releases) 下载对应平台的二进制：
+从 [Releases](https://github.com/AmaoQWQ/Phira-mp-plus/releases) 下载对应平台的二进制：
 - Linux（静态 musl）：`phira-mp-plus-server-linux-musl` / `-arm64-musl`
 - Windows：`phira-mp-plus-server-windows-x86_64`
 
@@ -110,7 +122,7 @@ PM_DATABASE_URL="postgres://postgres:your_password@localhost:5432/phira_mp_plus"
 
 ```bash
 # 克隆仓库
-git clone https://github.com/HyperSynapseNetwork/Phira-mp-plus.git
+git clone https://github.com/AmaoQWQ/Phira-mp-plus.git
 cd Phira-mp-plus
 
 # Docker Compose 会自动配置 database_url，默认配置即可
@@ -147,7 +159,7 @@ sudo apt install -y musl-tools
 **2. 构建**
 
 ```bash
-git clone https://github.com/HyperSynapseNetwork/Phira-mp-plus.git
+git clone https://github.com/AmaoQWQ/Phira-mp-plus.git
 cd Phira-mp-plus
 cargo build --release --target x86_64-unknown-linux-musl
 ```

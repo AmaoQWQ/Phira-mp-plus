@@ -280,6 +280,7 @@ async fn save_round_history(
                 .get(uid)
                 .cloned()
                 .unwrap_or_else(|| format!("{}", uid)),
+            record_id: rec.id,
             score: rec.score,
             accuracy: rec.accuracy,
             perfect: rec.perfect,
@@ -301,6 +302,7 @@ async fn save_round_history(
                     .get(uid)
                     .cloned()
                     .unwrap_or_else(|| format!("{}", uid)),
+                record_id: 0,
                 score: 0,
                 accuracy: 0.0,
                 perfect: 0,
@@ -386,6 +388,136 @@ enum ReadyCheckOutcome {
     StartFailed,
 }
 
+async fn emit_managed_round_started(
+    lc: &dyn RoomLifecycle,
+    state: &crate::room_actor::actor::RoomState,
+    round_id: uuid::Uuid,
+) {
+    let definition = lc
+        .server_state()
+        .managed_rooms
+        .read()
+        .await
+        .get(&lc.room().id.to_string())
+        .cloned();
+    let Some(_definition) = definition.filter(|definition| {
+        definition.kind == crate::managed_rooms::ManagedRoomKind::Hosted
+    }) else {
+        return;
+    };
+    let participant_ids: Vec<i32> = lc.users().await.into_iter().map(|user| user.id).collect();
+    let spectator_ids: Vec<i32> = lc.monitors().await.into_iter().map(|user| user.id).collect();
+    let mut in_phira_ids = participant_ids.clone();
+    in_phira_ids.extend(spectator_ids.iter().copied());
+    let Some(chart_id) = state.chart else { return };
+    let chart = crate::managed_rooms::ManagedChart {
+        id: chart_id,
+        name: state.chart_name.clone().unwrap_or_else(|| format!("#{chart_id}")),
+    };
+    let server = lc.server_state_arc();
+    crate::custom_room_callback::emit(
+        &server,
+        crate::managed_rooms::CustomRoomEvent::RoundStarted {
+            room_id: lc.room().id.to_string(),
+            round_id: round_id.to_string(),
+            participant_ids,
+            spectator_ids,
+            in_phira_ids,
+            chart,
+        },
+    );
+}
+
+async fn emit_managed_round_completed(
+    lc: &dyn RoomLifecycle,
+    round: &crate::room::PlayRound,
+) {
+    let definition = lc
+        .server_state()
+        .managed_rooms
+        .read()
+        .await
+        .get(&lc.room().id.to_string())
+        .cloned();
+    let Some(definition) = definition else {
+        return;
+    };
+    let aborted_ids: Vec<i32> = round
+        .results
+        .iter()
+        .filter(|result| result.aborted)
+        .map(|result| result.user_id)
+        .collect();
+    let results = serde_json::json!(round
+        .results
+        .iter()
+        .filter(|result| !result.aborted)
+        .map(|result| serde_json::json!({
+            "userId": result.user_id,
+            "recordId": result.record_id,
+            "score": result.score,
+            "accuracy": result.accuracy,
+            "fullCombo": result.full_combo,
+            "perfect": result.perfect,
+            "good": result.good,
+            "bad": result.bad,
+            "miss": result.miss,
+        }))
+        .collect::<Vec<_>>());
+    let server = lc.server_state_arc();
+    match definition.kind {
+        crate::managed_rooms::ManagedRoomKind::Hosted => {
+            crate::custom_room_callback::emit(
+                &server,
+                crate::managed_rooms::CustomRoomEvent::RoundCompleted {
+                    room_id: lc.room().id.to_string(),
+                    round_id: round.round_id.to_string(),
+                    results,
+                    aborted_ids,
+                },
+            );
+        }
+        crate::managed_rooms::ManagedRoomKind::Reserved => {
+            crate::custom_room_callback::emit_contest_result(
+                &server,
+                serde_json::json!({
+                    "roomId": lc.room().id.to_string(),
+                    "chartId": round.chart_id,
+                    "results": results,
+                    "abortedUserIds": aborted_ids,
+                }),
+            );
+        }
+    }
+}
+
+async fn emit_managed_round_cancelled(
+    lc: &dyn RoomLifecycle,
+    state: &crate::room_actor::actor::RoomState,
+    reason: &str,
+) {
+    let hosted = lc
+        .server_state()
+        .managed_rooms
+        .read()
+        .await
+        .get(&lc.room().id.to_string())
+        .is_some_and(|definition| {
+            definition.kind == crate::managed_rooms::ManagedRoomKind::Hosted
+        });
+    if !hosted {
+        return;
+    }
+    crate::custom_room_callback::emit(
+        &lc.server_state_arc(),
+        crate::managed_rooms::CustomRoomEvent::RoundCancelled {
+            room_id: lc.room().id.to_string(),
+            round_id: state.round.round_id.unwrap_or_else(uuid::Uuid::new_v4).to_string(),
+            reason: reason.to_string(),
+        },
+    );
+}
+
 /// Check if all users are ready (transition to Playing) or all have finished (transition to SelectChart).
 ///
 /// `deadline` is the absolute actor deadline of the command that triggered the
@@ -428,7 +560,7 @@ async fn check_all_ready(
                         host.try_send(ServerCommand::ChangeHost(true), room_seq(lc)).await;
                     }
                 }
-                let round_id = uuid::Uuid::new_v4();
+                let round_id = as_.state.round.round_id.unwrap_or_else(uuid::Uuid::new_v4);
                 as_.state.round.round_id = Some(round_id);
 
                 // --- FIX P0-D(1): open_round FIRST (durable admission) ---
@@ -518,6 +650,12 @@ async fn check_all_ready(
                 as_.state.playing_started_at = Some(now_ms());
                 set_playing_deadline(as_, lc.server_state());
                 broadcast_state_change(lc, &as_.state.lifecycle, as_.state.chart).await;
+                emit_managed_round_started(
+                    lc,
+                    &as_.state,
+                    round_id,
+                )
+                .await;
                 return ReadyCheckOutcome::Started;
             }
             // 未满员（或非 admin 强开）——仍处于 WaitForReady。
@@ -541,6 +679,7 @@ async fn check_all_ready(
                         room: lc.room().id.clone(),
                         round: crate::room::protocol_round(round),
                     }).await;
+                    emit_managed_round_completed(lc, round).await;
                 }
 
                 // Round close is now part of the atomic commit_round_completed
@@ -621,6 +760,13 @@ async fn check_all_ready(
                 as_.state.playing_started_at = None;
                 as_.state.progress_subscribers.clear();
                 as_.state.lifecycle = InternalRoomState::SelectChart;
+                let managed_kind = lc
+                    .server_state()
+                    .managed_rooms
+                    .read()
+                    .await
+                    .get(&lc.room().id.to_string())
+                    .map(|definition| definition.kind);
                 if as_.state.control.cycle
                     && !as_.state.control.system_host
                     && !as_.state.control.tournament
@@ -659,6 +805,22 @@ async fn check_all_ready(
                     }
                 }
                 broadcast_state_change(lc, &as_.state.lifecycle, as_.state.chart).await;
+                let server = lc.server_state_arc();
+                match managed_kind {
+                    Some(crate::managed_rooms::ManagedRoomKind::Reserved) => {
+                        crate::managed_rooms_runtime::schedule_reserved_postgame(
+                            &server,
+                            &lc.room().id.to_string(),
+                        );
+                    }
+                    Some(crate::managed_rooms::ManagedRoomKind::Hosted) => {
+                        crate::managed_rooms_runtime::advance_pool_after_round(
+                            &server,
+                            &lc.room().id.to_string(),
+                        );
+                    }
+                    None => {}
+                }
             }
             // Playing 分支的完成结算不是一次“开赛”，视为 Waiting（无新的 Started）。
             ReadyCheckOutcome::Waiting
@@ -695,6 +857,67 @@ pub(super) async fn force_start_playing(
         };
         users.iter().map(|u| u.id).filter(|id| !ready.contains(id)).collect()
     };
+    let hosted = lc
+        .server_state()
+        .managed_rooms
+        .read()
+        .await
+        .get(&lc.room().id.to_string())
+        .is_some_and(|definition| definition.kind == crate::managed_rooms::ManagedRoomKind::Hosted);
+    let ready_ids: Vec<i32> = match &state.lifecycle {
+        InternalRoomState::WaitForReady { started, .. } => started.iter().copied().collect(),
+        _ => Vec::new(),
+    };
+    let round_id = state.round.round_id.unwrap_or_else(uuid::Uuid::new_v4);
+
+    if hosted && ready_ids.len() < 2 {
+        let server = lc.server_state_arc();
+        crate::custom_room_callback::emit_many(
+            &server,
+            vec![
+                crate::managed_rooms::CustomRoomEvent::RoundReadyTimeout {
+                    room_id: lc.room().id.to_string(),
+                    round_id: round_id.to_string(),
+                    ready_ids,
+                },
+                crate::managed_rooms::CustomRoomEvent::RoundCancelled {
+                    room_id: lc.room().id.to_string(),
+                    round_id: round_id.to_string(),
+                    reason: "not-enough-ready-players".to_string(),
+                },
+            ],
+        );
+        state.lifecycle = InternalRoomState::SelectChart;
+        state.ready_countdown_started_at = None;
+        lc.send_msg(Message::CancelGame { user: 0 }).await;
+        broadcast_state_change(lc, &state.lifecycle, state.chart).await;
+        return;
+    }
+
+    if hosted {
+        crate::custom_room_callback::emit(
+            &lc.server_state_arc(),
+            crate::managed_rooms::CustomRoomEvent::RoundReadyTimeout {
+                room_id: lc.room().id.to_string(),
+                round_id: round_id.to_string(),
+                ready_ids: ready_ids.clone(),
+            },
+        );
+    }
+
+    if hosted && !unready.is_empty() {
+        let users = lc.users().await;
+        for user in users.into_iter().filter(|user| unready.contains(&user.id)) {
+            user.monitor.store(true, std::sync::atomic::Ordering::SeqCst);
+            lc.room().force_add_user(Arc::downgrade(&user), true).await;
+        }
+        state.members.users.retain(|id| !unready.contains(id));
+        for id in &unready {
+            if !state.members.monitors.contains(id) {
+                state.members.monitors.push(*id);
+            }
+        }
+    }
 
     // If admin_started, restore host
     if let InternalRoomState::WaitForReady { admin_started, .. } = &state.lifecycle {
@@ -710,7 +933,6 @@ pub(super) async fn force_start_playing(
         info!(user = id, room = %lc.room().id, "auto-aborted (ready timeout)");
     }
 
-    let round_id = uuid::Uuid::new_v4();
     state.round.round_id = Some(round_id);
     info!(room = lc.room().id.to_string(), round = %round_id, "game start (ready timeout)");
 
@@ -788,8 +1010,10 @@ pub(super) async fn force_start_playing(
 
     let results = HashMap::new();
     let mut aborted = HashSet::new();
-    for id in unready {
-        aborted.insert(id);
+    if !hosted {
+        for id in unready {
+            aborted.insert(id);
+        }
     }
     state.lifecycle = InternalRoomState::Playing { results, aborted };
     state.playing_started_at = Some(now_ms());
@@ -809,6 +1033,7 @@ pub(super) async fn force_start_playing(
         }
     }
     broadcast_state_change(lc, &state.lifecycle, state.chart).await;
+    emit_managed_round_started(lc, state, round_id).await;
 
     lc.dispatch_plugin_event(PluginEvent::GameStart {
         user_id: 0,
@@ -863,6 +1088,7 @@ pub(super) async fn force_end_playing(
                     room: lc.room().id.clone(),
                     round: crate::room::protocol_round(round),
                 }).await;
+                emit_managed_round_completed(lc, round).await;
             }
         }
         // Round close is now part of the atomic commit_round_completed
@@ -877,6 +1103,29 @@ pub(super) async fn force_end_playing(
         lc.send_msg(Message::GameEnd).await;
         state.lifecycle = InternalRoomState::SelectChart;
         broadcast_state_change(lc, &state.lifecycle, state.chart).await;
+        let definition = lc
+            .server_state()
+            .managed_rooms
+            .read()
+            .await
+            .get(&lc.room().id.to_string())
+            .cloned();
+        let server = lc.server_state_arc();
+        match definition.map(|definition| definition.kind) {
+            Some(crate::managed_rooms::ManagedRoomKind::Reserved) => {
+                crate::managed_rooms_runtime::schedule_reserved_postgame(
+                    &server,
+                    &lc.room().id.to_string(),
+                );
+            }
+            Some(crate::managed_rooms::ManagedRoomKind::Hosted) => {
+                crate::managed_rooms_runtime::advance_pool_after_round(
+                    &server,
+                    &lc.room().id.to_string(),
+                );
+            }
+            None => {}
+        }
     }
 }
 
@@ -1084,12 +1333,26 @@ impl RoomCommandHandler {
                 lc.room().send_system_msg_simple("room-closed-by-admin").await;
                 for user in lc.users().await {
                     *user.room.write().await = None;
-                    user.try_send(ServerCommand::LeaveRoom(Ok(())), room_seq(lc)).await;
+                    // 先确认 LeaveRoom 已写入客户端，再关闭旧连接。官方客户端
+                    // 随后重连时会拿到“无房间”状态，避免卡在已解散房间页面。
+                    let origin = user.current_origin().await;
+                    if let Err(error) = user.send_and_flush(ServerCommand::LeaveRoom(Ok(()))).await {
+                        tracing::warn!(user = user.id, %error, "解散房间时发送 LeaveRoom 失败，继续清理其他用户");
+                    }
+                    if let Some(origin) = origin {
+                        origin.close_uncertain().await;
+                    }
                     lc.publish_room_event(RoomEvent::LeaveRoom { room: lc.room().id.clone(), user: user.id }).await;
                 }
                 for monitor in lc.monitors().await {
                     *monitor.room.write().await = None;
-                    monitor.try_send(ServerCommand::LeaveRoom(Ok(())), room_seq(lc)).await;
+                    let origin = monitor.current_origin().await;
+                    if let Err(error) = monitor.send_and_flush(ServerCommand::LeaveRoom(Ok(()))).await {
+                        tracing::warn!(user = monitor.id, %error, "解散房间时发送 LeaveRoom 失败，继续清理其他观战者");
+                    }
+                    if let Some(origin) = origin {
+                        origin.close_uncertain().await;
+                    }
                 }
                 lc.remove_room(&lc.room().id).await;
                 lc.dispatch_plugin_event(PluginEvent::RoomModify {
@@ -1288,11 +1551,23 @@ impl RoomCommandHandler {
                     as_.state.lifecycle = InternalRoomState::SelectChart;
                     lc.send_msg(Message::CancelGame { user: 0 }).await;
                     broadcast_state_change(lc, &as_.state.lifecycle, as_.state.chart).await;
+                    emit_managed_round_cancelled(lc, &as_.state, "admin-cancelled").await;
+                    as_.state.round.round_id = None;
                 }
                 ok(RoomCommandPayload::CancelResult { room_id: room_id.clone().to_string(), canceled })
             }
 
             RoomActorCommand::SetChart { room_id, chart_id, chart_name, actor_user_id, deadline, origin, .. } => {
+                if *actor_user_id > 0 {
+                    let managed = lc.server_state().managed_rooms.read().await.get(&room_id.to_string()).cloned();
+                    if let Some(definition) = managed {
+                        if definition.kind == crate::managed_rooms::ManagedRoomKind::Reserved
+                            || definition.chart_mode == crate::managed_rooms::ChartMode::PoolRandom
+                        {
+                            return err("managed room chart is controlled by the server");
+                        }
+                    }
+                }
                 let as_ = ctx.expect_actor_state();
                 if !matches!(as_.state.lifecycle, InternalRoomState::SelectChart) {
                     return err("cannot set chart outside SelectChart state");
@@ -1319,6 +1594,25 @@ impl RoomCommandHandler {
                     chart_id: *chart_id,
                 });
                 ok(RoomCommandPayload::ChartSelected { room_id: room_id.clone().to_string(), chart_id: *chart_id })
+            }
+
+            RoomActorCommand::ClearChart { room_id, .. } => {
+                let as_ = ctx.expect_actor_state();
+                if !matches!(as_.state.lifecycle, InternalRoomState::SelectChart) {
+                    return err("cannot clear chart outside SelectChart state");
+                }
+                let _seq = bump_room_seq(lc, &mut as_.state).await;
+                as_.state.chart = None;
+                as_.state.chart_name = None;
+                broadcast_state_change(lc, &as_.state.lifecycle, None).await;
+                lc.publish_update(phira_mp_common::PartialRoomData {
+                    state: Some(phira_mp_common::StrippedRoomState::SelectingChart),
+                    ..Default::default()
+                }).await;
+                ok(RoomCommandPayload::ChartSelected {
+                    room_id: room_id.clone().to_string(),
+                    chart_id: 0,
+                })
             }
 
             RoomActorCommand::SetChartDuration { room_id, duration, .. } => {
@@ -1408,6 +1702,8 @@ impl RoomCommandHandler {
                             lc.send_msg(Message::CancelGame { user: *user_id }).await;
                             as_.state.lifecycle = InternalRoomState::SelectChart;
                             broadcast_state_change(lc, &as_.state.lifecycle, as_.state.chart).await;
+                            emit_managed_round_cancelled(lc, &as_.state, "host-cancelled").await;
+                            as_.state.round.round_id = None;
                             // P0-D: PMP extension — restore host privileges AFTER
                             // the official core sequence, never interleaved.
                             if admin_started {
@@ -1481,6 +1777,53 @@ impl RoomCommandHandler {
                         if results.insert(*user_id, record).is_some() { return err("already uploaded"); }
                     }
                     _ => return err("not in Playing state"),
+                }
+                let unfinished_ids: Vec<i32> = match &as_.state.lifecycle {
+                    InternalRoomState::Playing { results, aborted } => as_
+                        .state
+                        .members
+                        .users
+                        .iter()
+                        .filter(|id| !results.contains_key(id) && !aborted.contains(id))
+                        .copied()
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                if !unfinished_ids.is_empty() {
+                    let users = lc.users().await;
+                    let mut dangling = Vec::new();
+                    for unfinished_id in &unfinished_ids {
+                        let Some(user) = users.iter().find(|user| user.id == *unfinished_id) else {
+                            dangling.clear();
+                            break;
+                        };
+                        let deadline_ms = user
+                            .dangle_deadline_ms
+                            .load(std::sync::atomic::Ordering::Acquire);
+                        if deadline_ms <= crate::db::now_ms() || !user.current_session_id().await.is_empty() {
+                            dangling.clear();
+                            break;
+                        }
+                        dangling.push((Arc::clone(user), deadline_ms));
+                    }
+                    if dangling.len() == unfinished_ids.len() {
+                        for (user, deadline_ms) in dangling {
+                            if !user.reconnect_wait_notified.swap(
+                                true,
+                                std::sync::atomic::Ordering::AcqRel,
+                            ) {
+                                let remaining = ((deadline_ms - crate::db::now_ms()).max(0) + 999) / 1000;
+                                lc.send_msg(Message::Chat {
+                                    user: 0,
+                                    content: format!(
+                                        "正在等待玩家 {} 重连，剩余约 {} 秒",
+                                        user.name, remaining
+                                    ),
+                                })
+                                .await;
+                            }
+                        }
+                    }
                 }
                 lc.publish_room_event(RoomEvent::PlayerScore {
                     room: lc.room().id.clone(),
@@ -1564,6 +1907,16 @@ impl RoomCommandHandler {
             }
 
             RoomActorCommand::HostStart { room_id, user_id, deadline, origin, .. } => {
+                let managed_kind = lc
+                    .server_state()
+                    .managed_rooms
+                    .read()
+                    .await
+                    .get(&room_id.to_string())
+                    .map(|definition| definition.kind);
+                if managed_kind == Some(crate::managed_rooms::ManagedRoomKind::Reserved) {
+                    return err("reserved rooms are started by the server");
+                }
                 let as_ = ctx.expect_actor_state();
                 if !matches!(as_.state.lifecycle, InternalRoomState::SelectChart) {
                     return err("room is not selecting a chart");
@@ -1591,6 +1944,9 @@ impl RoomCommandHandler {
                 as_.state.lifecycle = InternalRoomState::WaitForReady {
                     started: std::iter::once(*user_id).collect(), admin_started: false,
                 };
+                if managed_kind == Some(crate::managed_rooms::ManagedRoomKind::Hosted) {
+                    as_.state.round.round_id = Some(uuid::Uuid::new_v4());
+                }
                 as_.state.ready_countdown_started_at = Some(now_ms());
                 broadcast_state_change(lc, &as_.state.lifecycle, as_.state.chart).await;
                 let start_outcome = check_all_ready(lc, as_, *deadline).await;
@@ -1642,8 +1998,24 @@ impl RoomCommandHandler {
                 if origin_stale(lc, origin, *user_id).await {
                     return refuse_stale_origin();
                 }
-                let current_count = lc.users().await.len();
-                if current_count >= as_.state.control.max_users && !monitor {
+                let managed = lc
+                    .server_state()
+                    .managed_rooms
+                    .read()
+                    .await
+                    .get(&room_id.to_string())
+                    .cloned();
+                if let Some(definition) = &managed {
+                    if !definition.contains_user(*user_id) && !monitor {
+                        return err("user is not in managed room whitelist");
+                    }
+                }
+                let current_count = as_.state.members.users.len();
+                let max_users = managed
+                    .as_ref()
+                    .map(|definition| definition.max_users)
+                    .unwrap_or(as_.state.control.max_users);
+                if current_count >= max_users && !monitor {
                     return err("room is full");
                 }
                 // PMP46 Blocker 2: 权威状态变更前递增序号（audit §7.5）。
@@ -1663,6 +2035,15 @@ impl RoomCommandHandler {
                     // keep `host_id = None` so they report host -1. A joiner
                     // must never silently take over a system-hosted room, and
                     // joining an empty room must not make the joiner host.
+                    // 托管房是例外：未指定协议房主时，首位白名单玩家在 actor
+                    // 提交点静默成为房主，ChangeHost 在 JoinRoom 响应 flush 后补发。
+                    if managed.as_ref().is_some_and(|definition| {
+                        definition.kind == crate::managed_rooms::ManagedRoomKind::Hosted
+                    }) && as_.state.control.host_id.is_none()
+                    {
+                        as_.state.control.host_id = Some(*user_id);
+                        as_.state.control.system_host = false;
+                    }
                 }
                 // PMP44 P0-M: 插件事件是 response-after——成员变更（join）是权威
                 // 状态提交，插件回调绝不阻塞 Actor reply。
@@ -1684,7 +2065,7 @@ impl RoomCommandHandler {
                 ok(RoomCommandPayload::UserAdded {
                     room_id: room_id.clone().to_string(), user_id: *user_id,
                     monitor: *monitor,
-                    room_full: current_count + 1 >= as_.state.control.max_users,
+                    room_full: current_count + 1 >= max_users,
                 })
             }
 
@@ -1705,16 +2086,34 @@ impl RoomCommandHandler {
                         .or_else(|| monitors.iter().find(|u| u.id == *user_id).cloned())
                 };
                 // PMP46 Blocker 2: 权威成员移除前递增序号（audit §7.5）。
-                {
+                let departing_was_host = {
                     let as_ = ctx.expect_actor_state();
                     let _seq = bump_room_seq(lc, &mut as_.state).await;
-                }
+                    as_.state.control.host_id == Some(*user_id)
+                };
                 match user {
                     Some(user) => {
                         let was_monitor = user.monitor.load(std::sync::atomic::Ordering::SeqCst);
+                        // 主动离房时旧房主连接仍然有效，必须撤销其本地按钮权限；
+                        // 掉线路径没有可用 origin，发送会安全失败而不影响接管。
+                        if departing_was_host {
+                            user.try_send(ServerCommand::ChangeHost(false), room_seq(lc)).await;
+                        }
                         let should_drop = lc.on_user_leave(&user).await
                             && !lc.room().control_snapshot().persistent_empty;
                         if should_drop { lc.remove_room(&lc.room().id).await; }
+                        if should_drop {
+                            let room_id_text = lc.room().id.to_string();
+                            let mut managed = lc.server_state().managed_rooms.write().await;
+                            if managed
+                                .get(&room_id_text)
+                                .is_some_and(|definition| {
+                                    definition.kind == crate::managed_rooms::ManagedRoomKind::Reserved
+                                })
+                            {
+                                managed.remove(&room_id_text);
+                            }
+                        }
                         if !was_monitor {
                             lc.publish_room_event(RoomEvent::LeaveRoom { room: lc.room().id.clone(), user: *user_id }).await;
                         }
@@ -1739,6 +2138,16 @@ impl RoomCommandHandler {
                         // leave path was broken because `host_id` was never
                         // cleared (assign_room_host_if_missing bails when
                         // `host_id.is_some()`).
+                        let managed_host_departed = as_.state.control.host_id == Some(*user_id)
+                            && lc
+                                .server_state()
+                                .managed_rooms
+                                .read()
+                                .await
+                                .get(&room_id.to_string())
+                                .is_some_and(|definition| {
+                                    definition.kind == crate::managed_rooms::ManagedRoomKind::Hosted
+                                });
                         if !should_drop
                             && as_.state.control.host_id == Some(*user_id)
                             && !as_.state.control.tournament
@@ -1778,6 +2187,22 @@ impl RoomCommandHandler {
                                     ..Default::default()
                                 }).await;
                             }
+                        }
+                        if managed_host_departed {
+                            let new_host = as_.state.control.host_id;
+                            let srv = lc.server_state_arc();
+                            let persisted_room_id = room_id.to_string();
+                            crate::supervisor_actor::spawn_named(
+                                format!("hosted-room-host-change-{persisted_room_id}"),
+                                async move {
+                                    crate::managed_rooms_runtime::persist_host_change(
+                                        &srv,
+                                        &persisted_room_id,
+                                        new_host,
+                                    )
+                                    .await;
+                                },
+                            );
                         }
                         // PMP45 P0-O: 插件回调是 response-after（spawn，不经过 room
                         // mailbox），权威成员移除、on_user_leave、LeaveRoom 广播与
@@ -1902,6 +2327,19 @@ impl RoomCommandHandler {
                     room_id: room_id.clone().to_string(),
                     persistent_empty: *persistent_empty,
                 })
+            }
+
+            RoomActorCommand::SetMaxUsers { max_users, .. } => {
+                if !(1..=crate::managed_rooms::MAX_MANAGED_ROOM_USERS).contains(max_users) {
+                    return err("invalid room capacity");
+                }
+                let as_ = ctx.expect_actor_state();
+                if *max_users < as_.state.members.users.len() {
+                    return err("room capacity is below current users");
+                }
+                let _seq = bump_room_seq(lc, &mut as_.state).await;
+                as_.state.control.max_users = *max_users;
+                ok(RoomCommandPayload::Empty)
             }
 
             RoomActorCommand::BindAndSnapshot { room_id, user_id, .. } => {

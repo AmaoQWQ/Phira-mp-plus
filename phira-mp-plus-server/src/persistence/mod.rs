@@ -9,6 +9,7 @@ pub mod control;
 pub mod diagnostics;
 pub mod events;
 pub mod high_frequency;
+pub mod managed_rooms;
 pub mod message;
 pub mod pipeline;
 pub mod process;

@@ -146,6 +146,10 @@ wasm_runtime:
 | `extensions_file` | `String?` | `data/extensions.json` | 扩展数据持久化 JSON 路径。 |
 | `cli_enabled` | `bool` | `true` | 是否启用交互式 TUI/CLI 管理控制台。`--no-cli` 会覆盖为 false。 |
 | `chat_enabled` | `bool` | `true` | 是否允许聊天；可通过 `config reload` 热更新。 |
+| `room_creation_enabled` | `bool` | `true` | 是否允许普通客户端建房；CLI/OpenUDS 修改后以 500ms 防抖写回 YAML。环境变量：`ROOM_CREATION_ENABLED`。 |
+| `admin_token` | `String` | `""` | PMP+ 自带 `/admin/rooms` 管理接口令牌；为空时接口关闭。环境变量：`ADMIN_TOKEN`。 |
+| `custom_room_event_callback_url` | `String?` | 未设置 | 可选房间事件回调；未设置时托管房独立运行。环境变量：`CUSTOM_ROOM_EVENT_CALLBACK_URL`。 |
+| `contest_result_callback_url` | `String?` | 未设置 | 可选比赛结果回调地址。环境变量：`CONTEST_RESULT_CALLBACK_URL`。 |
 | `max_rooms` | `usize?` | 不限制 | 最大房间数。达到上限后会拒绝继续创建房间。 |
 | `max_users_per_room` | `usize?` | `100` | 每个房间最大玩家数。 |
 | `chat_history_limit` | `usize` | `50` | 每房间内存保留的最近聊天消息条数（新人加入时回放；0 = 不缓存）。 |
@@ -183,14 +187,14 @@ Release 必须同时发布 `SHA256SUMS`（或 `SHA256SUMS.txt`），且包含所
 | `auto_update.enabled` | `bool` | `false` | 自动更新总开关。可通过 CLI `update auto on\|off` 运行时切换。 |
 | `auto_update.check_interval_secs` | `u64` | `3600` | 检查新版本间隔（秒）。 |
 | `auto_update.min_idle_minutes` | `u64` | `10` | 无在线玩家达到此分钟数才允许自动更新。 |
-| `auto_update.github_repo` | `String` | `HyperSynapseNetwork/Phira-mp-plus` | 更新来源 GitHub 仓库（owner/repo）。 |
+| `auto_update.github_repo` | `String` | `AmaoQWQ/Phira-mp-plus` | 更新来源 GitHub 仓库（owner/repo）。 |
 
 ```yaml
 auto_update:
   enabled: false          # 默认关，需显式开启
   check_interval_secs: 3600
   min_idle_minutes: 10
-  github_repo: "HyperSynapseNetwork/Phira-mp-plus"
+  github_repo: "AmaoQWQ/Phira-mp-plus"
 ```
 
 注意事项：
@@ -429,7 +433,7 @@ RUST_LOG=debug ./phira-mp-plus-server
 | `idle.heartbeat_timeout_secs` | `u64` | `15` | 会话心跳超时阈值。 |
 | `idle.auth_timeout_secs` | `u64` | `15` | 未认证连接超时阈值。 |
 | `idle.dangle_grace_secs` | `u64` | `10` | 断线重连宽限时间（秒）。玩家断线后在此时长内重连可恢复。 |
-| `idle.playing_reconnect_grace_secs` | `u64` | `15` | Playing 状态断线重连宽限（秒）。Playing 中断线不立即踢出房间，保留成员资格等待重连。设为 0 恢复旧行为（立即踢出）。 |
+| `idle.playing_reconnect_grace_secs` | `u64` | `5` | Playing 状态断线重连宽限（秒）。Playing 中断线不立即踢出房间，保留成员资格等待重连。设为 0 恢复旧行为（立即踢出）。环境变量：`PLAYING_RECONNECT_GRACE`。 |
 
 ### jemalloc 内存分配器
 
@@ -527,7 +531,7 @@ PMP 启动时自动执行恢复流程：
 
 ```yaml
 idle:
-  playing_reconnect_grace_secs: 15  # 0 = 关闭，恢复旧行为
+  playing_reconnect_grace_secs: 5  # 0 = 关闭，恢复旧行为
 ```
 
 宽限期内：

@@ -1573,7 +1573,7 @@ impl Session {
                                     let tx = crate::session_actor::init_session_mailbox(session);
                                     let _ = session.actor_tx.set(tx);
                                 }
-                                let room_state = match user.room.read().await.as_ref() {
+                                let (room_state, auth_wfr_repair) = match user.room.read().await.as_ref() {
                                     Some(room) => {
                                         // PMP45 P0-F / PMP46 Blocker 2: 优先经 Room Actor
                                         // 原子快照（`BindAndSnapshot`）。Room Actor 在自身
@@ -1605,7 +1605,20 @@ impl Session {
                                                 );
                                                 let _cutover =
                                                     gate.begin_room_cutover(data.snapshot_seq).await;
-                                                Some(data.into_client_room_state())
+                                                let repair = if matches!(
+                                                    data.state,
+                                                    phira_mp_common::StrippedRoomState::WaitingForReady
+                                                ) && data.chart.is_some()
+                                                {
+                                                    Some(data.chart)
+                                                } else {
+                                                    None
+                                                };
+                                                let mut client_state = data.into_client_room_state();
+                                                if let Some(chart) = repair {
+                                                    client_state.state = phira_mp_common::RoomState::SelectChart(chart);
+                                                }
+                                                (Some(client_state), repair)
                                             }
                                             Err(err) => {
                                                 warn!(
@@ -1643,7 +1656,7 @@ impl Session {
                                             }
                                         }
                                     }
-                                    None => None,
+                                    None => (None, None),
                                 };
                                 // ── 会话绑定前预算检查 ──────────────────────────
                                 // WAL 异步后移：UserAuthenticated 持久化不再阻塞握手，
@@ -1930,6 +1943,21 @@ impl Session {
                                 // Session 发布进全局 sessions 表。
                                 if let Some(session) = this.get() {
                                     session.mark_active();
+                                }
+                                if auth_wfr_repair.is_some() {
+                                    if let Some(origin) = user.current_origin().await {
+                                        let mut compatibility_config = server.config.clone();
+                                        compatibility_config.compatibility.protocol_hack_delay_ms = Some(20);
+                                        crate::official_client_compat::post_response::schedule_post_response(
+                                            &compatibility_config,
+                                            vec![crate::official_client_compat::post_response::PostResponseItem::to_origin(
+                                                origin,
+                                                crate::official_client_compat::post_response::PostResponseKind::ChangeState,
+                                                ServerCommand::ChangeState(phira_mp_common::RoomState::WaitingForReady),
+                                                "authenticate-wait-for-ready-restore",
+                                            )],
+                                        );
+                                    }
                                 }
                                 // ── WAL 异步后移：UserAuthenticated 持久化不阻塞握手 ──
                                 // 认证已达成 Active（AuthOK 已 flush、gate 已激活），

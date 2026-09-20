@@ -178,7 +178,7 @@
 - **WASM**：wasm_runtime（见插件节）
 - **运行时**：persistence_queue_capacity、WAL/DLQ 路径、persistent_rooms_required、startup_recovery_timeout(30s)
 - **保留**：`table_retention`（每表策略：`{max_rows?, days?, time_col?}`，支持任意表；max_rows 超限清 80%、days 超期删）——取代旧全局 retention_days
-- **断线**：heartbeat_timeout(15s)、auth_timeout(15s)、dangle_grace(10s)、playing_reconnect_grace(15s)
+- **断线**：heartbeat_timeout(15s)、auth_timeout(15s)、dangle_grace(10s)、playing_reconnect_grace(5s)
 - **其他**：monitors、admin_phira_ids、sentry_dsn、plugins_dir、cli_enabled、openuds、graceful_shutdown_timeout
 - **覆盖顺序**：YAML < 环境变量（PM_DATABASE_URL）< CLI 参数
 
@@ -229,7 +229,7 @@
 
 ## 十五、数据存储总览（房间 / 用户 / 持久化）
 
-### 房间数据（内存状态，非持久化）
+### 房间数据（运行状态在内存；托管定义持久化）
 
 房间是 **Actor 模型**：权威状态在 `RoomActorState`（每房间独占），外部只读走快照缓存。
 
@@ -303,6 +303,45 @@
 | `mp_runtime_benchmark_reports` | benchmark 报告 |
 | `mp_runtime_retention_policies` | 保留策略元数据 |
 | `mp_runtime_persistence_meta` | 持久化运行元数据 |
+| `mp_managed_rooms` | 托管房完整定义及解散墓碑；服务重启时恢复有效托管房 |
+
+---
+
+## 十六、独立托管房与预约白名单房
+
+这些能力直接位于 PMP+ 服务端，不依赖 Phirank、网站大厅或外部匹配服务。设置
+`ADMIN_TOKEN` 后即可通过原生 HTTP 管理接口创建；不设置
+`CUSTOM_ROOM_EVENT_CALLBACK_URL` 时，只是不发送可选回调，不影响建房、游玩、重连和持久化。
+
+管理请求使用 `x-admin-token`，可用接口包括：
+
+- `POST /admin/rooms/hosted`：创建或幂等取得长期托管房；支持 `HOST_SELECT` 和 `POOL_RANDOM`。
+- `GET/PATCH /admin/rooms/{roomId}/hosted`：查询或更新托管房。
+- `GET/PUT /admin/rooms/{roomId}/chart_pool`：维护本地随机谱池。
+- `POST /admin/rooms/precreate`：创建一次性预约白名单房。
+- `POST /admin/rooms/{roomId}/max_users`：动态调整容量。
+- `POST /admin/rooms/{roomId}/disband`：管理员解散房间。
+
+例如，创建一个尚未选谱的 `HOST_SELECT` 托管房：
+
+```http
+POST /admin/rooms/hosted
+x-admin-token: <ADMIN_TOKEN>
+content-type: application/json
+
+{"roomId":"practice-1","allowedUserIds":[10001,10002],"maxUsers":4,"hostId":10001,"chartMode":"HOST_SELECT","chart":null}
+```
+
+也可在 PMP+ 控制台直接执行：
+
+```text
+room hosted-create practice-1 4 10001 HOST_SELECT 10001,10002
+room managed-info practice-1
+room managed-disband practice-1
+```
+
+托管房空房不会自动删除，只有管理员解散才写入永久删除状态。`POOL_RANDOM`
+从服务端本地谱池选谱；房主不能绕过模式自行改谱。一次性预约房在完整白名单玩家进入并准备后自动开始，入房响应后保留 500ms 客户端状态安装窗口，结算后保留最多 60 秒供玩家主动离开。
 
 ---
 

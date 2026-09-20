@@ -499,6 +499,13 @@ pub async fn join_room(
     let Some(room) = room else {
         bail!("{}", tl!("room-not-found"))
     };
+    let managed_definition = user
+        .server
+        .managed_rooms
+        .read()
+        .await
+        .get(&id.to_string())
+        .cloned();
     check_deadline!();
     // Compute effective_monitor from category to prevent Normal/Console sessions
     // from bypassing lock/ban/game-state gates by sending monitor=true.
@@ -516,6 +523,11 @@ pub async fn join_room(
     let mut late_join = false;
     let mut need_abort = false;
     if !effective_monitor {
+        if let Some(definition) = &managed_definition {
+            if !definition.contains_user(user.id) && !user.server.is_admin_id(user.id).await {
+                bail!("{}", tl!("join-room-not-whitelisted"));
+            }
+        }
         // Use control_snapshot for lock check (actor-authoritative)
         let control = room.control_snapshot();
         if control.locked {
@@ -611,7 +623,10 @@ pub async fn join_room(
     // P0-E: room-full pre-check BEFORE the actor AddUser so a full room bails
     // deterministically instead of running actor AddUser + registry rollback.
     if !effective_monitor {
-        let max_users = room.control_snapshot().max_users;
+        let max_users = managed_definition
+            .as_ref()
+            .map(|definition| definition.max_users)
+            .unwrap_or_else(|| room.control_snapshot().max_users);
         if room.users().await.len() >= max_users {
             bail!("{}", tl!("join-room-full"));
         }
@@ -751,18 +766,20 @@ pub async fn join_room(
     // ProtocolHack: 断线重连时，如果房间在 WaitForReady，先以 SelectChart
     // 响应让客户端拿到谱面 ID，再异步切回 WaitingForReady（Phira 客户端在
     // WaitingForReady 状态下不直接包含谱面 ID）。
+    let selected_chart = user
+        .server
+        .room_snapshot(&room.id.to_string())
+        .and_then(|snapshot| snapshot.chart);
     let (room_state, deferred_wfr) = if late_join {
-        let chart = if let Some(server) = room.server.upgrade() {
-            server.room_snapshot(&room.id.to_string())
-                .and_then(|s| s.chart)
-        } else {
-            None
-        };
-        (phira_mp_common::RoomState::SelectChart(chart), false)
+        (phira_mp_common::RoomState::SelectChart(selected_chart), false)
     } else {
         let client_state = build_client_room_state(&room, &user).await;
         let is_waiting = matches!(client_state.state, phira_mp_common::RoomState::WaitingForReady);
-        (client_state.state, is_waiting)
+        if is_waiting && selected_chart.is_some() {
+            (phira_mp_common::RoomState::SelectChart(selected_chart), true)
+        } else {
+            (client_state.state, false)
+        }
     };
 
     // 先发送 JoinRoom(Ok) 响应，确保客户端先拿到完整快照。
@@ -830,6 +847,23 @@ pub async fn join_room(
             ),
         );
     }
+    let control = room.control_snapshot();
+    compensations.push(
+        crate::official_client_compat::post_response::PostResponseItem::to_origin(
+            origin.clone(),
+            crate::official_client_compat::post_response::PostResponseKind::PersistentRoom,
+            ServerCommand::Message(Message::CycleRoom { cycle: control.cycle }),
+            "join-cycle-state",
+        ),
+    );
+    compensations.push(
+        crate::official_client_compat::post_response::PostResponseItem::to_origin(
+            origin.clone(),
+            crate::official_client_compat::post_response::PostResponseKind::PersistentRoom,
+            ServerCommand::Message(Message::LockRoom { lock: control.locked }),
+            "join-lock-state",
+        ),
+    );
     if deferred_wfr {
         // ProtocolHack (P1): 客户端刚收到 SelectChart 快照，需在官方响应 flush
         // 之后发送 GameStart 让客户端切换到 WaitingForReady 并显示准备按钮。
@@ -843,10 +877,33 @@ pub async fn join_room(
         );
     }
     if !compensations.is_empty() {
+        let mut compatibility_config = user.server.config.clone();
+        if managed_definition.is_some() {
+            compatibility_config.compatibility.protocol_hack_delay_ms = Some(20);
+        }
         crate::official_client_compat::post_response::schedule_post_response(
-            &user.server.config,
+            &compatibility_config,
             compensations,
         );
+    }
+
+    if managed_definition
+        .as_ref()
+        .is_some_and(|definition| definition.kind == crate::managed_rooms::ManagedRoomKind::Reserved)
+    {
+        crate::managed_rooms_runtime::schedule_reserved_autostart(&user.server, &id.to_string());
+    }
+    if became_host
+        && managed_definition
+            .as_ref()
+            .is_some_and(|definition| definition.kind == crate::managed_rooms::ManagedRoomKind::Hosted)
+    {
+        let state = Arc::clone(&user.server);
+        let room_id = id.to_string();
+        let host_id = user.id;
+        crate::supervisor_actor::spawn_named(format!("hosted-room-first-host-{room_id}"), async move {
+            crate::managed_rooms_runtime::persist_host_change(&state, &room_id, Some(host_id)).await;
+        });
     }
 
     // 再发送聊天历史（仅 Chat 消息），让客户端在完整快照后接收增量消息。

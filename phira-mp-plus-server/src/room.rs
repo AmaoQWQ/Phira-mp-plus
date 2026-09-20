@@ -121,6 +121,9 @@ impl PlayerLiveData {
 pub struct PlayResult {
     pub user_id: i32,
     pub user_name: String,
+    /// Phira 成绩记录 ID；旧持久化记录缺失时按 0 兼容。
+    #[serde(default)]
+    pub record_id: i32,
     pub score: i32,
     pub accuracy: f32,
     pub perfect: i32,
@@ -473,7 +476,17 @@ impl Room {
         } else {
             let mut guard = self.users.write().await;
             guard.retain(|it| it.strong_count() > 0);
-            let max_users = self.control_snapshot().max_users;
+            let max_users = if let Some(server) = self.server.upgrade() {
+                server
+                    .managed_rooms
+                    .read()
+                    .await
+                    .get(&self.id.to_string())
+                    .map(|definition| definition.max_users)
+                    .unwrap_or_else(|| self.control_snapshot().max_users)
+            } else {
+                self.control_snapshot().max_users
+            };
             if guard.len() >= max_users {
                 false
             } else {

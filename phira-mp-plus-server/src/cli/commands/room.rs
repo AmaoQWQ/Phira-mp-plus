@@ -4,6 +4,42 @@ impl CliHandler {
     pub(in crate::cli) async fn dispatch_room_command(&self, args: &[&str]) {
         let sub = args.first().copied().unwrap_or("");
         match sub {
+            "hosted-create" => {
+                if args.len() < 6 {
+                    self.out(format!(
+                        "  {} {} room hosted-create <房间ID> <容量> <房主ID|none> <HOST_SELECT|POOL_RANDOM> <白名单ID逗号列表> [谱面ID] [谱面名称]",
+                        c::yellow("?"),
+                        c::bold("用法")
+                    ));
+                } else {
+                    self.room_hosted_create(&args[1..]).await;
+                }
+            }
+            "reserved-create" => {
+                if args.len() < 5 {
+                    self.out(format!(
+                        "  {} {} room reserved-create <房间ID> <谱面ID> <谱面名称> <白名单ID逗号列表> [有效秒数]",
+                        c::yellow("?"),
+                        c::bold("用法")
+                    ));
+                } else {
+                    self.room_reserved_create(&args[1..]).await;
+                }
+            }
+            "managed-info" => {
+                if args.len() < 2 {
+                    self.out(format!("  {} {} room managed-info <房间ID>", c::yellow("?"), c::bold("用法")));
+                } else {
+                    self.room_managed_info(args[1]).await;
+                }
+            }
+            "managed-disband" => {
+                if args.len() < 2 {
+                    self.out(format!("  {} {} room managed-disband <房间ID>", c::yellow("?"), c::bold("用法")));
+                } else {
+                    self.room_managed_disband(args[1]).await;
+                }
+            }
             "create-empty" => {
                 if args.len() < 2 {
                     self.out(format!(
@@ -445,13 +481,173 @@ impl CliHandler {
                     c::red("✗"),
                     c::yellow(sub)
                 ));
-                self.out(format!("  {} 可用: room list|create-empty|info|start|ready|cancel|lock|cycle|kick|host|force-move|hide|unhide|close|set|history|rounds|round|uuid|ban|unban|banlist", c::dim("▸")));
+                self.out(format!("  {} 可用: room hosted-create|reserved-create|managed-info|managed-disband|create-empty|info|start|ready|cancel|lock|cycle|kick|host|force-move|hide|unhide|close|set|history|rounds|round|uuid|ban|unban|banlist", c::dim("▸")));
             }
         }
     }
 }
 
 impl CliHandler {
+    fn parse_managed_user_ids(&self, value: &str) -> Result<Vec<i32>, String> {
+        let mut ids = Vec::new();
+        for raw in value.split(',').map(str::trim).filter(|value| !value.is_empty()) {
+            let id = raw
+                .parse::<i32>()
+                .map_err(|_| format!("无效的白名单用户 ID：{raw}"))?;
+            ids.push(id);
+        }
+        if ids.is_empty() {
+            return Err("白名单不能为空".to_string());
+        }
+        Ok(ids)
+    }
+
+    pub(crate) async fn room_hosted_create(&self, args: &[&str]) {
+        use crate::managed_rooms::{ChartMode, ManagedChart, ManagedRoomDefinition, ManagedRoomKind};
+
+        let max_users = match args[1].parse::<usize>() {
+            Ok(value) => value,
+            Err(_) => {
+                self.out(format!("  {} 无效的房间容量", c::red("✗")));
+                return;
+            }
+        };
+        let host_id = if args[2].eq_ignore_ascii_case("none") || args[2] == "-" {
+            None
+        } else {
+            match args[2].parse::<i32>() {
+                Ok(value) => Some(value),
+                Err(_) => {
+                    self.out(format!("  {} 无效的房主 ID", c::red("✗")));
+                    return;
+                }
+            }
+        };
+        let chart_mode = match args[3].to_ascii_uppercase().as_str() {
+            "HOST_SELECT" => ChartMode::HostSelect,
+            "POOL_RANDOM" => ChartMode::PoolRandom,
+            _ => {
+                self.out(format!("  {} 选谱模式只能是 HOST_SELECT 或 POOL_RANDOM", c::red("✗")));
+                return;
+            }
+        };
+        let whitelist = match self.parse_managed_user_ids(args[4]) {
+            Ok(ids) => ids,
+            Err(error) => {
+                self.out(format!("  {} {error}", c::red("✗")));
+                return;
+            }
+        };
+        let chart = match args.get(5) {
+            Some(raw_id) => match raw_id.parse::<i32>() {
+                Ok(id) => Some(ManagedChart {
+                    id,
+                    name: args.get(6).copied().unwrap_or("未命名谱面").to_string(),
+                }),
+                Err(_) => {
+                    self.out(format!("  {} 无效的谱面 ID", c::red("✗")));
+                    return;
+                }
+            },
+            None => None,
+        };
+        let chart_pool = if chart_mode == ChartMode::PoolRandom {
+            chart.clone().into_iter().collect()
+        } else {
+            Vec::new()
+        };
+        let definition = ManagedRoomDefinition {
+            room_id: args[0].to_string(),
+            kind: ManagedRoomKind::Hosted,
+            owner_id: None,
+            max_users,
+            whitelist,
+            host_id,
+            chart,
+            chart_mode,
+            chart_pool,
+            expires_at: None,
+        };
+        match crate::managed_rooms_runtime::create(&self.state, definition).await {
+            Ok(crate::managed_rooms_runtime::CreateOutcome::Created) => self.out(format!(
+                "  {} 托管房 {} 已创建并持久化",
+                c::green("✓"), c::bold(args[0])
+            )),
+            Ok(crate::managed_rooms_runtime::CreateOutcome::Existing) => self.out(format!(
+                "  {} 托管房 {} 已存在，配置相同，未重复创建",
+                c::green("✓"), c::bold(args[0])
+            )),
+            Err(error) => self.out(format!("  {} 创建托管房失败：{error}", c::red("✗"))),
+        }
+    }
+
+    pub(crate) async fn room_reserved_create(&self, args: &[&str]) {
+        use crate::managed_rooms::{ChartMode, ManagedChart, ManagedRoomDefinition, ManagedRoomKind};
+
+        let chart_id = match args[1].parse::<i32>() {
+            Ok(value) => value,
+            Err(_) => {
+                self.out(format!("  {} 无效的谱面 ID", c::red("✗")));
+                return;
+            }
+        };
+        let whitelist = match self.parse_managed_user_ids(args[3]) {
+            Ok(ids) => ids,
+            Err(error) => {
+                self.out(format!("  {} {error}", c::red("✗")));
+                return;
+            }
+        };
+        let expires_in = match args.get(4).copied().unwrap_or("1800").parse::<u64>() {
+            Ok(value) if (30..=86_400).contains(&value) => value,
+            _ => {
+                self.out(format!("  {} 有效秒数必须在 30 至 86400 之间", c::red("✗")));
+                return;
+            }
+        };
+        let definition = ManagedRoomDefinition {
+            room_id: args[0].to_string(),
+            kind: ManagedRoomKind::Reserved,
+            owner_id: None,
+            max_users: whitelist.len(),
+            whitelist,
+            host_id: None,
+            chart: Some(ManagedChart { id: chart_id, name: args[2].to_string() }),
+            chart_mode: ChartMode::HostSelect,
+            chart_pool: Vec::new(),
+            expires_at: Some(crate::db::now_ms() + expires_in as i64 * 1000),
+        };
+        match crate::managed_rooms_runtime::create(&self.state, definition).await {
+            Ok(crate::managed_rooms_runtime::CreateOutcome::Created) => self.out(format!(
+                "  {} 一次性白名单房 {} 已创建",
+                c::green("✓"), c::bold(args[0])
+            )),
+            Ok(crate::managed_rooms_runtime::CreateOutcome::Existing) => self.out(format!(
+                "  {} 房间 {} 已存在，配置相同，未重复创建",
+                c::green("✓"), c::bold(args[0])
+            )),
+            Err(error) => self.out(format!("  {} 创建一次性白名单房失败：{error}", c::red("✗"))),
+        }
+    }
+
+    pub(crate) async fn room_managed_info(&self, room_id: &str) {
+        let definition = self.state.managed_rooms.read().await.get(room_id).cloned();
+        match definition {
+            Some(definition) => match serde_json::to_string_pretty(&definition) {
+                Ok(value) => self.out(value),
+                Err(error) => self.out(format!("  {} 无法显示房间定义：{error}", c::red("✗"))),
+            },
+            None => self.out(format!("  {} 未找到管理房间 {room_id}", c::red("✗"))),
+        }
+    }
+
+    pub(crate) async fn room_managed_disband(&self, room_id: &str) {
+        match crate::managed_rooms_runtime::disband(&self.state, room_id).await {
+            Ok(()) => self.out(format!("  {} 管理房间 {} 已永久解散", c::green("✓"), c::bold(room_id))),
+            Err(error) => self.out(format!("  {} 解散房间失败：{error}", c::red("✗"))),
+        }
+    }
+
     pub(crate) async fn kick_from_room(&self, room_id: &str, target_id: &str) {
         let target: i32 = match target_id.parse() {
             Ok(id) => id,

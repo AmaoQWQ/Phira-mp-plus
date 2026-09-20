@@ -23,6 +23,7 @@ pub(super) enum RoomCommandKind {
     SetHidden,
     SetEndpoint,
     SetPersistentEmpty,
+    SetMaxUsers,
     CloseRoom,
     KickUser,
     StartRoom,
@@ -90,6 +91,7 @@ impl RoomCommandKind {
             Self::AddJudges => "add_judges",
             Self::SetDisplayName => "set_display_name",
             Self::SetPersistentEmpty => "set_persistent_empty",
+            Self::SetMaxUsers => "set_max_users",
             Self::TelemetryTouches => "telemetry_touches",
             Self::TelemetryJudges => "telemetry_judges",
             Self::BindAndSnapshot => "bind_and_snapshot",
@@ -184,6 +186,11 @@ pub(crate) enum RoomActorCommand {
         deadline: std::time::Instant,
         /// PMP44 P0-C: origin Session (id + generation).
         origin: RoomOrigin,
+        reply: oneshot::Sender<RoomCommandResult>,
+    },
+    /// 管理端清除托管房当前谱面，回到 SelectChart(None)。
+    ClearChart {
+        room_id: String,
         reply: oneshot::Sender<RoomCommandResult>,
     },
     /// 写入/清空当前谱面时长（秒），供对局超时计算（PMP48：选谱解析、结算释放）。
@@ -331,6 +338,11 @@ pub(crate) enum RoomActorCommand {
         persistent_empty: bool,
         reply: oneshot::Sender<RoomCommandResult>,
     },
+    SetMaxUsers {
+        _room_id: String,
+        max_users: usize,
+        reply: oneshot::Sender<RoomCommandResult>,
+    },
     /// PMP45 P0-F: 原子认证快照。Room Actor 在自身的排序点一次性捕获
     /// `ClientRoomState`（state / members / display_names 全部来自
     /// `actor_state`），并返回网关 command_seq 作为 cutover token。认证路径
@@ -373,7 +385,7 @@ impl RoomActorCommand {
             Self::EnterReadyPhase { .. } => RoomCommandKind::EnterReadyPhase,
             Self::CancelStart { .. } => RoomCommandKind::CancelStart,
             Self::HostStart { .. } => RoomCommandKind::HostStart,
-            Self::SetChart { .. } => RoomCommandKind::SetChart,
+            Self::SetChart { .. } | Self::ClearChart { .. } => RoomCommandKind::SetChart,
             Self::SetChartDuration { .. } => RoomCommandKind::SetChartDuration,
             Self::RegisterProgress { .. } => RoomCommandKind::RegisterProgress,
             Self::SetReady { .. } => RoomCommandKind::SetReady,
@@ -389,6 +401,7 @@ impl RoomActorCommand {
             Self::AddJudges { .. } => RoomCommandKind::AddJudges,
             Self::SetDisplayName { .. } => RoomCommandKind::SetDisplayName,
             Self::SetPersistentEmpty { .. } => RoomCommandKind::SetPersistentEmpty,
+            Self::SetMaxUsers { .. } => RoomCommandKind::SetMaxUsers,
             Self::TelemetryTouches { .. } => RoomCommandKind::TelemetryTouches,
             Self::TelemetryJudges { .. } => RoomCommandKind::TelemetryJudges,
             Self::BindAndSnapshot { .. } => RoomCommandKind::BindAndSnapshot,
@@ -410,6 +423,7 @@ impl RoomActorCommand {
             | Self::CancelStart { reply, .. }
             | Self::HostStart { reply, .. }
             | Self::SetChart { reply, .. }
+            | Self::ClearChart { reply, .. }
             | Self::SetChartDuration { reply, .. }
             | Self::RegisterProgress { reply, .. }
             | Self::SetReady { reply, .. }
@@ -425,6 +439,7 @@ impl RoomActorCommand {
             | Self::AddJudges { reply, .. }
             | Self::SetDisplayName { reply, .. }
             | Self::SetPersistentEmpty { reply, .. }
+            | Self::SetMaxUsers { reply, .. }
             | Self::BindAndSnapshot { reply, .. } => {
                 let _ = reply.send(result);
             }

@@ -21,6 +21,38 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("rooms", "rooms", "查看活跃房间。", "rooms")
             .handler(no_arg(|h| Box::pin(async move { h.list_rooms().await }))),
         CommandSpec::new(
+            "room hosted-create",
+            "rooms",
+            "创建可跨多局、空房保留并可在重启后恢复的托管房。",
+            "room hosted-create <room_id> <capacity> <host_id|none> <HOST_SELECT|POOL_RANDOM> <user_ids_csv> [chart_id] [chart_name]",
+        )
+        .advanced()
+        .handler(room_sub("hosted-create")),
+        CommandSpec::new(
+            "room reserved-create",
+            "rooms",
+            "创建集齐白名单后自动开始的一次性预约房。",
+            "room reserved-create <room_id> <chart_id> <chart_name> <user_ids_csv> [expires_seconds]",
+        )
+        .advanced()
+        .handler(room_sub("reserved-create")),
+        CommandSpec::new(
+            "room managed-info",
+            "rooms",
+            "查看托管房或一次性预约房定义。",
+            "room managed-info <room_id>",
+        )
+        .advanced()
+        .handler(room_sub("managed-info")),
+        CommandSpec::new(
+            "room managed-disband",
+            "rooms",
+            "永久解散托管房或一次性预约房。",
+            "room managed-disband <room_id>",
+        )
+        .advanced()
+        .handler(room_sub("managed-disband")),
+        CommandSpec::new(
             "room create-empty",
             "rooms",
             "创建无人持久空房间。",

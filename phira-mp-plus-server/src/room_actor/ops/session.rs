@@ -88,6 +88,24 @@ impl RoomCommandGateway {
             .into_untyped()
     }
 
+    /// 清除管理房当前谱面。仅供服务端管理路径使用。
+    pub async fn clear_chart(
+        &self,
+        state: &PlusServerState,
+        room_id: &str,
+    ) -> Result<Value, String> {
+        let started = Instant::now();
+        let rid = room_id.to_string();
+        let result = self
+            .room_mailbox(&rid, None, |reply| RoomActorCommand::ClearChart {
+                room_id: rid.clone(),
+                reply,
+            })
+            .await;
+        self.finish_command(state, RoomCommandKind::SetChart.action(), room_id, started, result)
+            .into_untyped()
+    }
+
 
     // ── SetReady ──────────────────────────────────────────────────────────
 

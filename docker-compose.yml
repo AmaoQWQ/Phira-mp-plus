@@ -1,12 +1,13 @@
 version: "3.8"
 
+# Set PMP_POSTGRES_PASSWORD before starting. Do not commit real passwords.
 services:
   postgres:
     image: postgres:16-alpine
     environment:
       POSTGRES_DB: phira_mp_plus
       POSTGRES_USER: pmp
-      POSTGRES_PASSWORD: pmp_pass
+      POSTGRES_PASSWORD: "${PMP_POSTGRES_PASSWORD:?set PMP_POSTGRES_PASSWORD}"
     volumes:
       - pgdata:/var/lib/postgresql/data
     restart: unless-stopped
@@ -19,13 +20,20 @@ services:
   phira-mp-plus:
     build: .
     ports:
-      - "12346:12346"
-      - "12347:12347"
+      - "12356:12356"
+      - "12357:12357"
     environment:
-      PM_DATABASE_URL: "postgres://pmp:pmp_pass@postgres:5432/phira_mp_plus"
+      PM_DATABASE_URL: "postgres://pmp:${PMP_POSTGRES_PASSWORD:?set PMP_POSTGRES_PASSWORD}@postgres:5432/phira_mp_plus"
+      ROOM_CREATION_ENABLED: "${ROOM_CREATION_ENABLED:-true}"
+      ROOM_MAX_USERS: "${ROOM_MAX_USERS:-64}"
+      MAX_ROOMS: "${MAX_ROOMS:-100}"
+      PLAYING_RECONNECT_GRACE: "${PLAYING_RECONNECT_GRACE:-5}"
+      ADMIN_TOKEN: "${ADMIN_TOKEN:-}"
+      CONTEST_RESULT_CALLBACK_URL: "${CONTEST_RESULT_CALLBACK_URL:-}"
+      CUSTOM_ROOM_EVENT_CALLBACK_URL: "${CUSTOM_ROOM_EVENT_CALLBACK_URL:-}"
       RUST_LOG: info
     volumes:
-      - ./server_config.yml:/etc/pmp/server_config.yml:ro
+      - ./server_config.yml:/etc/pmp/server_config.yml:rw
       - ./data:/var/lib/pmp/data
       - ./plugins:/var/lib/pmp/plugins
     depends_on:

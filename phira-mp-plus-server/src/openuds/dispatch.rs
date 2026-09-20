@@ -1114,6 +1114,7 @@ async fn cmd_server_roomcreation(
     state
         .room_creation_enabled
         .store(enabled, std::sync::atomic::Ordering::Release);
+    crate::server::config::schedule_room_creation_config_save(state);
     Ok(serde_json::json!({"room_creation_enabled": enabled}))
 }
 
