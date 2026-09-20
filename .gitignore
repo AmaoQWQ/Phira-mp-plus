@@ -28,6 +28,7 @@ data/
 
 # Hidden directories (reference material, local config)
 .??*
+!.gitattributes
 phira-mp/phira-mp-server/
 phira-mp/phira-mp-client/
 phira-mp/target/

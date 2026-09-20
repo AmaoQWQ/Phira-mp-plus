@@ -1,0 +1,4 @@
+# This migration was first shipped from the Windows manager checkout with LF.
+# Keep its SQLx checksum stable while older upstream migrations retain their
+# platform-specific checkout endings for backward compatibility.
+phira-mp-plus-server/migrations/20260916000001_managed_rooms.sql text eol=lf
